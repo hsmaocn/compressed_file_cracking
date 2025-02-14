@@ -1,178 +1,99 @@
-import sys
 import os
 import threading
 import zipfile
-import chardet
-from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QLabel, QLineEdit, QFileDialog, QTextEdit, QVBoxLayout, QWidget, QHBoxLayout, QSpinBox
+from tkinter import Tk, Label, Entry, Button, StringVar, Text, Scrollbar, END
+from concurrent.futures import ThreadPoolExecutor
 
-class PasswordCracker(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.initUI()
-        self.passwords = []
-        self.current_password_index = 0
-        self.lock = threading.Lock()
-        self.stop_event = threading.Event()
+# 验证压缩包完整性
+def validate_zip(zip_path):
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zip_file:
+            if zip_file.testzip() is not None:
+                return False
+        return True
+    except Exception as e:
+        print(f"压缩包损坏或无法打开: {e}")
+        return False
 
-    def initUI(self):
-        self.setWindowTitle("压缩包密码破解工具")
-        self.setGeometry(100, 100, 600, 400)
+# 尝试解压
+def try_extract(zip_path, password):
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zip_file:
+            zip_file.extractall(pwd=password.encode('utf-8'))
+        return True
+    except (RuntimeError, zipfile.BadZipFile):
+        return False
+    except Exception as e:
+        print(f"解压异常: {e}")
+        return False
 
-        # 布局
-        layout = QVBoxLayout()
+# 密码破解主函数
+def crack_password(zip_path, dict_file, num_threads, result_var, log_text):
+    if not validate_zip(zip_path):
+        log_text.insert(END, "压缩包损坏或不完整，请检查！\n")
+        return
 
-        # 选择字典文件
-        self.dict_label = QLabel("字典文件:")
-        self.dict_path_edit = QLineEdit()
-        self.dict_browse_btn = QPushButton("浏览")
-        self.dict_browse_btn.clicked.connect(self.browse_dict_file)
-        
-        dict_layout = QHBoxLayout()
-        dict_layout.addWidget(self.dict_label)
-        dict_layout.addWidget(self.dict_path_edit)
-        dict_layout.addWidget(self.dict_browse_btn)
-        layout.addLayout(dict_layout)
+    passwords = []
+    try:
+        with open(dict_file, 'r', encoding='utf-8') as f:
+            passwords = [line.strip() for line in f]
+    except UnicodeDecodeError:
+        log_text.insert(END, "字典文件编码错误，请使用 UTF-8 格式！\n")
+        return
 
-        # 选择压缩包文件
-        self.zip_label = QLabel("压缩包文件:")
-        self.zip_path_edit = QLineEdit()
-        self.zip_browse_btn = QPushButton("浏览")
-        self.zip_browse_btn.clicked.connect(self.browse_zip_file)
-        
-        zip_layout = QHBoxLayout()
-        zip_layout.addWidget(self.zip_label)
-        zip_layout.addWidget(self.zip_path_edit)
-        zip_layout.addWidget(self.zip_browse_btn)
-        layout.addLayout(zip_layout)
+    def worker(passwords_chunk):
+        for pwd in passwords_chunk:
+            if try_extract(zip_path, pwd):
+                result_var.set(pwd)
+                log_text.insert(END, f"密码已找到: {pwd}\n")
+                return
+            log_text.insert(END, f"尝试密码: {pwd}\n")
 
-        # 线程数设置
-        self.thread_label = QLabel("线程数:")
-        self.thread_spinbox = QSpinBox()
-        self.thread_spinbox.setRange(1, 50)
-        self.thread_spinbox.setValue(5)
-        
-        thread_layout = QHBoxLayout()
-        thread_layout.addWidget(self.thread_label)
-        thread_layout.addWidget(self.thread_spinbox)
-        layout.addLayout(thread_layout)
+    # 分割密码列表
+    chunk_size = len(passwords) // num_threads
+    chunks = [passwords[i:i + chunk_size] for i in range(0, len(passwords), chunk_size)]
 
-        # 开始按钮
-        self.start_btn = QPushButton("开始破解")
-        self.start_btn.clicked.connect(self.start_cracking)
-        layout.addWidget(self.start_btn)
+    # 多线程执行
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        for chunk in chunks:
+            executor.submit(worker, chunk)
 
-        # 日志显示
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        layout.addWidget(self.log_text)
+# GUI 界面
+def main():
+    root = Tk()
+    root.title("压缩包密码破解工具")
 
-        # 设置主窗口布局
-        container = QWidget()
-        container.setLayout(layout)
-        self.setCentralWidget(container)
+    # 变量
+    zip_path_var = StringVar()
+    dict_path_var = StringVar()
+    thread_num_var = StringVar(value="3")
+    result_var = StringVar()
 
-    def browse_dict_file(self):
-        options = QFileDialog.Options()
-        file_name, _ = QFileDialog.getOpenFileName(self, "选择字典文件", "", "Text Files (*.txt);;All Files (*)", options=options)
-        if file_name:
-            self.dict_path_edit.setText(file_name)
+    # 布局
+    Label(root, text="压缩包路径:").grid(row=0, column=0, sticky="w")
+    Entry(root, textvariable=zip_path_var, width=50).grid(row=0, column=1)
+    Label(root, text="字典文件路径:").grid(row=1, column=0, sticky="w")
+    Entry(root, textvariable=dict_path_var, width=50).grid(row=1, column=1)
+    Label(root, text="线程数:").grid(row=2, column=0, sticky="w")
+    Entry(root, textvariable=thread_num_var, width=50).grid(row=2, column=1)
+    Label(root, text="破解结果:").grid(row=3, column=0, sticky="w")
+    Label(root, textvariable=result_var, fg="green").grid(row=3, column=1, sticky="w")
 
-    def browse_zip_file(self):
-        options = QFileDialog.Options()
-        file_name, _ = QFileDialog.getOpenFileName(self, "选择压缩包文件", "", "ZIP Files (*.zip);;All Files (*)", options=options)
-        if file_name:
-            self.zip_path_edit.setText(file_name)
+    log_text = Text(root, height=10, width=60)
+    log_text.grid(row=4, column=0, columnspan=2)
+    scrollbar = Scrollbar(root, command=log_text.yview)
+    scrollbar.grid(row=4, column=2, sticky="ns")
+    log_text.config(yscrollcommand=scrollbar.set)
 
-    def load_dictionary(self, dict_path):
-        try:
-            with open(dict_path, 'rb') as f:
-                raw_data = f.read()
-                encoding = chardet.detect(raw_data)['encoding']
-                if encoding is None:
-                    raise ValueError("无法检测字典文件编码")
-                self.passwords = raw_data.decode(encoding).splitlines()
-                self.log(f"加载字典文件成功，编码: {encoding}")
-        except Exception as e:
-            self.log(f"加载字典文件失败: {str(e)}")
+    def start_crack():
+        zip_path = zip_path_var.get()
+        dict_path = dict_path_var.get()
+        num_threads = int(thread_num_var.get())
+        crack_password(zip_path, dict_path, num_threads, result_var, log_text)
 
-    def verify_zip_integrity(self, zip_path):
-        try:
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                bad_file = zf.testzip()
-                if bad_file:
-                    self.log(f"压缩包损坏: {bad_file}")
-                    return False
-                else:
-                    self.log("压缩包完整性验证通过")
-                    return True
-        except zipfile.BadZipFile:
-            self.log("压缩包损坏，无法打开")
-            return False
+    Button(root, text="开始破解", command=start_crack).grid(row=5, column=0, columnspan=2)
 
-    def crack_password(self, zip_path, password):
-        try:
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                zf.extractall(pwd=password.encode('utf-8'))
-                self.log(f"密码破解成功: {password}")
-                self.stop_event.set()
-        except RuntimeError as e:
-            if 'Bad password' in str(e):
-                self.log(f"密码错误: {password}")
-            else:
-                self.log(f"解压时发生错误: {str(e)}")
-        except Exception as e:
-            self.log(f"未知错误: {str(e)}")
-
-    def worker(self, zip_path):
-        while not self.stop_event.is_set():
-            with self.lock:
-                if self.current_password_index >= len(self.passwords):
-                    break
-                password = self.passwords[self.current_password_index]
-                self.current_password_index += 1
-            self.crack_password(zip_path, password)
-
-    def start_cracking(self):
-        dict_path = self.dict_path_edit.text()
-        zip_path = self.zip_path_edit.text()
-        thread_count = self.thread_spinbox.value()
-
-        if not os.path.isfile(dict_path):
-            self.log("字典文件不存在，请重新选择")
-            return
-
-        if not os.path.isfile(zip_path):
-            self.log("压缩包文件不存在，请重新选择")
-            return
-
-        if not self.verify_zip_integrity(zip_path):
-            return
-
-        self.load_dictionary(dict_path)
-        if not self.passwords:
-            self.log("字典文件为空或无法读取")
-            return
-
-        self.current_password_index = 0
-        self.stop_event.clear()
-
-        threads = []
-        for _ in range(thread_count):
-            t = threading.Thread(target=self.worker, args=(zip_path,))
-            threads.append(t)
-            t.start()
-
-        for t in threads:
-            t.join()
-
-        if not self.stop_event.is_set():
-            self.log("所有密码尝试完毕，未找到正确密码")
-
-    def log(self, message):
-        self.log_text.append(message)
+    root.mainloop()
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = PasswordCracker()
-    window.show()
-    sys.exit(app.exec_())
+    main()
